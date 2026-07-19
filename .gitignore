@@ -1,0 +1,6 @@
+node_modules/
+coverage/
+dist/
+*.log
+native/target/
+native/pi-recall-native*.node

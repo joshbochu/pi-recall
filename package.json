@@ -1,0 +1,60 @@
+{
+  "name": "pi-recall",
+  "version": "0.3.0",
+  "description": "Fast, native full-text search and resume for Pi sessions",
+  "type": "module",
+  "license": "MIT",
+  "files": [
+    "src",
+    "native/Cargo.toml",
+    "native/Cargo.lock",
+    "native/build.rs",
+    "native/src",
+    "native/pi-recall-native-v2.node",
+    "scripts",
+    "docs",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "keywords": [
+    "pi-package",
+    "pi",
+    "session-search",
+    "recall"
+  ],
+  "scripts": {
+    "build:native": "node scripts/build-native.mjs",
+    "check": "tsc --noEmit",
+    "check:native": "cargo check --manifest-path native/Cargo.toml",
+    "postinstall": "npm run build:native",
+    "prepack": "npm run build:native",
+    "pretest": "npm run build:native",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "dependencies": {},
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.80.10",
+    "@earendil-works/pi-coding-agent": "0.80.10",
+    "@earendil-works/pi-tui": "0.80.10",
+    "@types/node": "24.12.0",
+    "typebox": "1.1.38",
+    "typescript": "5.9.3",
+    "vitest": "4.1.9"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}

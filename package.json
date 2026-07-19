@@ -4,13 +4,20 @@
   "description": "Fast, native full-text search and resume for Pi sessions",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/joshbochu/pi-recall.git"
+  },
+  "homepage": "https://github.com/joshbochu/pi-recall#readme",
+  "bugs": {
+    "url": "https://github.com/joshbochu/pi-recall/issues"
+  },
   "files": [
     "src",
     "native/Cargo.toml",
     "native/Cargo.lock",
     "native/build.rs",
     "native/src",
-    "native/pi-recall-native-v2.node",
     "scripts",
     "docs",
     "README.md",

@@ -11,7 +11,7 @@ engine.
 The package builds a platform-native addon during installation, so Rust and Cargo must be available.
 
 ```bash
-pi install npm:pi-recall
+pi install npm:@joshbochu/pi-recall
 ```
 
 For local development or installation from a checkout:

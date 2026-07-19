@@ -1,5 +1,5 @@
 {
-  "name": "pi-recall",
+  "name": "@joshbochu/pi-recall",
   "version": "0.3.0",
   "description": "Fast, native full-text search and resume for Pi sessions",
   "type": "module",

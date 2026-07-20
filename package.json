@@ -12,6 +12,10 @@
   "bugs": {
     "url": "https://github.com/joshbochu/pi-recall/issues"
   },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "files": [
     "src",
     "native/Cargo.toml",

@@ -147,6 +147,21 @@ load the generated N-API module.
 See [docs/architecture.md](docs/architecture.md) for the component boundaries, native bridge, data
 flow, and operational tradeoffs.
 
+## Publishing
+
+Publishing is handled by GitHub Actions when a GitHub Release is published. Before the first
+automated release, configure `@joshbochu/pi-recall` on npm with a GitHub Actions trusted publisher:
+
+- Organization or user: `joshbochu`
+- Repository: `pi-recall`
+- Workflow filename: `publish.yml`
+- Allowed action: `npm publish`
+
+To release, update the version in `package.json` and `package-lock.json`, merge that change, and
+publish a GitHub Release whose tag is the same version prefixed with `v` (for example, `v0.4.0`).
+The workflow validates the tag, runs the TypeScript and Rust checks and the test suite, then publishes
+the public package to npm using short-lived OIDC credentials.
+
 ## License
 
 MIT. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for required third-party notices.

@@ -130,8 +130,8 @@ jobs:
         continue-on-error: true
         working-directory: npm/${{ matrix.target }}
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: node ../../scripts/publish-npm.mjs
 
       - name: Report platform publish result
         if: steps.publish.outcome != 'success'
@@ -166,8 +166,8 @@ jobs:
 
       - name: Publish package
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: node scripts/publish-npm.mjs
 
   finalize:
     needs: [version, publish]

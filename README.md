@@ -170,12 +170,12 @@ Before the first automated release, configure a GitHub Actions trusted publisher
 - Workflow filename: `publish.yml`
 - Allowed action: `npm publish`
 
-**First-time platform packages:** npm trusted publishing cannot create a brand-new package
-name. Either publish each `@joshbochu/pi-recall-native-*` package once with an npm token, or
-add a granular/automation token (with permission to create packages under `@joshbochu`) as the
-repository secret `NPM_TOKEN`. After the packages exist, configure trusted publishers for them
-and you can remove the token. Until a platform package is on npm, the root publish still
-proceeds and `postinstall` falls back to a local Cargo build for that platform.
+The publish job uses OIDC trusted publishing by default (`scripts/publish-npm.mjs`). Do not set
+an empty `NODE_AUTH_TOKEN`; that disables OIDC. Optionally set repository secret `NPM_TOKEN` when
+you need to create brand-new platform package names (trusted publishing cannot create a package
+that does not exist yet). After those packages exist and have trusted publishers, you can remove
+the token. Until a platform package is on npm, the root publish still proceeds and `postinstall`
+falls back to a local Cargo build for that platform.
 
 `npm run pack:platform -- <target> [cargo-target]` builds one platform package locally into
 `npm/<target>/`. `node scripts/next-version.mjs` prints the next publish version, and

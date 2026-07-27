@@ -1,7 +1,8 @@
-// Release preflight: the git tag must match the package version, any pinned
-// prebuilt addon versions must match it too, and the release workflow matrix
-// must cover exactly the platforms in native-targets.mjs. A forgotten platform
-// otherwise means users on it silently fall back to compiling from source.
+// Release preflight: when a v* tag is provided it must match the package
+// version; any pinned prebuilt addon versions must match too; and the release
+// workflow matrix must cover exactly the platforms in native-targets.mjs.
+// Branch pushes (publish-on-main) skip the tag check because CI bumps the
+// version after checkout.
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,7 +14,7 @@ const workflow = await readFile(join(root, ".github/workflows/publish.yml"), "ut
 const tag = process.argv[2] ?? process.env.GITHUB_REF_NAME;
 const problems = [];
 
-if (tag && tag !== `v${manifest.version}`) {
+if (tag && /^v\d/u.test(tag) && tag !== `v${manifest.version}`) {
   problems.push(`tag ${tag} does not match package version v${manifest.version}`);
 }
 

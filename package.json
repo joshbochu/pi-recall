@@ -44,6 +44,8 @@
     "test:watch": "vitest",
     "pack:platform": "node scripts/pack-platform.mjs",
     "stamp:prebuilt": "node scripts/stamp-prebuilt-deps.mjs",
+    "version:next": "node scripts/next-version.mjs",
+    "version:set": "node scripts/set-version.mjs",
     "check:release": "node scripts/check-release.mjs"
   },
   "pi": {

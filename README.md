@@ -151,10 +151,14 @@ flow, and operational tradeoffs.
 
 ## Publishing
 
-Publishing is handled by GitHub Actions when a GitHub Release is published. The workflow runs
-the checks, then builds and publishes one prebuilt addon package per platform
-(`@joshbochu/pi-recall-native-<target>`), then publishes the root package, whose
-`optionalDependencies` pin those addons to the same version.
+Every push to `main` publishes a new package version via GitHub Actions (`publish.yml`).
+The workflow chooses the next patch version from the greater of `package.json` and the
+latest version on npm, runs the checks, builds and publishes one prebuilt addon package
+per platform (`@joshbochu/pi-recall-native-<target>`), publishes the root package with
+`optionalDependencies` pinned to those addons, then records `release: vX.Y.Z` and tag
+`vX.Y.Z` on `main`. Release commits are skipped so the version bump does not republish.
+
+You can also run the workflow manually with **Actions → Publish to npm → Run workflow**.
 
 Before the first automated release, configure a GitHub Actions trusted publisher on npm for
 `@joshbochu/pi-recall` **and** for each platform package
@@ -167,19 +171,18 @@ Before the first automated release, configure a GitHub Actions trusted publisher
 - Allowed action: `npm publish`
 
 `npm run pack:platform -- <target> [cargo-target]` builds one platform package locally into
-`npm/<target>/`, and `npm run check:release -- <tag>` verifies that the tag matches the
-package version and that `publish.yml` builds exactly the platforms listed in
-`scripts/native-targets.mjs`.
+`npm/<target>/`. `node scripts/next-version.mjs` prints the next publish version, and
+`npm run check:release` verifies that any `v*` tag matches the package version and that
+`publish.yml` builds exactly the platforms listed in `scripts/native-targets.mjs`.
 
 `optionalDependencies` is not committed: a lock file cannot reference a version that has not
 been published, so committing it would break `npm ci`. The workflow publishes the platform
 packages first, then runs `npm run stamp:prebuilt`, so the published tarball always points at
 addons that exist.
 
-To release, update the version in `package.json` and `package-lock.json`, merge that change, and
-publish a GitHub Release whose tag is the same version prefixed with `v` (for example, `v0.4.0`).
-The workflow validates the tag, runs the TypeScript and Rust checks and the test suite, then publishes
-the public package to npm using short-lived OIDC credentials.
+Manual major/minor bumps still work: raise the version in `package.json` (and the lockfile)
+above the latest npm release, merge to `main`, and the workflow publishes that version
+instead of the next patch.
 
 ## License
 

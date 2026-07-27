@@ -1,15 +1,46 @@
 name: Publish to npm
 
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: publish-main
+  cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 jobs:
+  version:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      !startsWith(github.event.head_commit.message, 'release:')
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.next.outputs.version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Choose next package version
+        id: next
+        run: |
+          version="$(node scripts/next-version.mjs)"
+          node scripts/set-version.mjs "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Publishing ${version}"
+
   verify:
+    needs: version
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -21,7 +52,10 @@ jobs:
           node-version: "24"
           package-manager-cache: false
 
-      - name: Verify release version and platform package versions
+      - name: Apply publish version
+        run: node scripts/set-version.mjs "${{ needs.version.outputs.version }}"
+
+      - name: Verify release metadata and platform package versions
         run: node scripts/check-release.mjs
 
       - name: Install dependencies
@@ -37,7 +71,7 @@ jobs:
         run: npm test
 
   publish-native:
-    needs: verify
+    needs: [version, verify]
     strategy:
       fail-fast: true
       matrix:
@@ -69,6 +103,9 @@ jobs:
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
 
+      - name: Apply publish version
+        run: node scripts/set-version.mjs "${{ needs.version.outputs.version }}"
+
       - name: Add Rust target
         run: rustup target add ${{ matrix.cargo-target }}
 
@@ -87,7 +124,7 @@ jobs:
         working-directory: npm/${{ matrix.target }}
 
   publish:
-    needs: publish-native
+    needs: [version, publish-native]
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -100,8 +137,48 @@ jobs:
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
 
+      - name: Apply publish version
+        run: node scripts/set-version.mjs "${{ needs.version.outputs.version }}"
+
       - name: Pin the prebuilt addons published above
         run: npm run stamp:prebuilt
 
       - name: Publish package
         run: npm publish --access public
+
+  finalize:
+    needs: [version, publish]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Record published version in git
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          node scripts/set-version.mjs "$VERSION"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json native/Cargo.toml
+          if git diff --staged --quiet; then
+            echo "version files already at ${VERSION}"
+          else
+            git commit -m "release: v${VERSION}"
+            git push origin HEAD:main
+          fi
+          if git rev-parse "v${VERSION}" >/dev/null 2>&1; then
+            echo "tag v${VERSION} already exists"
+          else
+            git tag "v${VERSION}"
+            git push origin "v${VERSION}"
+          fi

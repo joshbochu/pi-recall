@@ -2,38 +2,25 @@
 
 Fast full-text search and native session resume for [Pi](https://github.com/earendil-works/pi).
 
-`pi-recall` is a hybrid TypeScript/Rust Pi extension. Pi supplies session parsing, the overlay, and
-native `ctx.switchSession()` handling; a small Rust N-API addon supplies the Tantivy index and ranking
-engine.
+Search prior Pi sessions, filter by `#tags`, and resume the one you want — from a
+terminal picker or from the model via a built-in `recall` tool.
 
-## Prerequisites and install
+## Install
 
 ```bash
 pi install npm:@joshbochu/pi-recall
 ```
 
-Installation uses a prebuilt addon for macOS (arm64, x64), Linux (x64, arm64, glibc) and
-Windows (x64). On any other platform the addon is compiled during installation, which
-requires Rust and Cargo; the installer says so rather than failing inside `cargo`.
+Supported prebuilt addons: macOS (arm64, x64), Linux glibc (x64, arm64), Windows (x64).
+Other platforms compile during install and need Rust/Cargo.
 
-For local development or installation from a checkout:
+In-session manual (after install):
 
-```bash
-git clone https://github.com/joshbochu/pi-recall.git
-cd pi-recall
-npm install
-pi install /absolute/path/to/pi-recall
+```text
+/recall help
 ```
 
-Or try the checkout without installing it:
-
-```bash
-pi -e /absolute/path/to/pi-recall
-```
-
-## Use
-
-Open the Pi-native picker:
+## Quick start
 
 ```text
 /recall
@@ -42,24 +29,33 @@ Open the Pi-native picker:
 /recall authentication #codebase
 ```
 
-While it is open:
+| Key | Action |
+| --- | --- |
+| Type | Search (trailing tokens get prefix matching while you type) |
+| ↑ / ↓ | Move selection |
+| Enter | Resume the selected session |
+| Tab | Toggle this folder ↔ all projects |
+| Esc | Close |
 
-- Type to search.
-- Up/Down changes the selected session.
-- Tab switches between the current folder and all projects.
-- Enter resumes through Pi's native session switch.
-- Escape closes the picker.
+`/recall-reindex` rebuilds the search index. Tags and config are kept.
 
-The header reports displayed results against the searchable corpus, such as `50 of 120 sessions`.
-Force a clean rebuild with `/recall-reindex`; ordinary use automatically reconciles new, modified,
-and deleted sessions.
+## Commands
 
-The model also receives one `recall` tool with `search`, `list`, and `read` actions, allowing it to
-retrieve prior Pi work without shelling out to a separate application.
+| Command | What it does |
+| --- | --- |
+| `/recall [query]` | Open the session picker, optionally with an initial query |
+| `/recall search <query>` | Same as `/recall`, but safe when the query starts with a command word (`tag`, `help`, …) |
+| `/recall help` | Show the in-session manual (`?`, `manual`, `-h`, `--help` also work) |
+| `/recall tag #a #b` | Add manual tags to the **current** session |
+| `/recall untag #a` | Remove tags from the current session |
+| `/recall tags` | Show manual and generated tags for the current session |
+| `/recall autotag` | Generate tags for the current session |
+| `/recall autotag --all-untagged` | Confirm, then auto-tag every searchable session that has no tags |
+| `/recall-reindex` | Discard and rebuild the Tantivy index |
 
-### Session tags
+## Session tags
 
-Tags belong to the current session and survive index rebuilds:
+Tags belong to the current session and survive `/recall-reindex`:
 
 ```text
 /recall tag #codebase #rust #search
@@ -69,16 +65,12 @@ Tags belong to the current session and survive index rebuilds:
 /recall autotag --all-untagged
 ```
 
-Because those words are command names, use `/recall search tag`, `/recall search tags`, or similar
-when you want to search for the literal command word.
+- `#tag` in a search query is an **exact** session filter (multiple hashtags AND together).
+- Remaining words are ordinary full-text search over message content and tag text.
+- Manual tags are never replaced by generated tags; an explicitly removed tag is suppressed from later generation.
+- `--all-untagged` shows a confirmation overlay with session count and model before any API calls. Esc cancels.
 
-`/recall autotag` generates tags for the current session. `--all-untagged` finds every searchable
-session with no manual or generated tags, then shows an overlay containing the exact session count
-and model before making any calls. Escape cancels the progress overlay. Manual tags are never
-replaced by generated tags, and an explicitly removed tag is suppressed from later generation.
-
-Auto-tagging uses Pi's currently selected model by default. To choose a model and tag count, create
-`~/.pi/agent/pi-recall/config.json`:
+Default auto-tag model is whatever Pi has selected. Override in `~/.pi/agent/pi-recall/config.json`:
 
 ```json
 {
@@ -90,52 +82,60 @@ Auto-tagging uses Pi's currently selected model by default. To choose a model an
 }
 ```
 
-The model must exist in Pi's model registry and have configured credentials. Auto-tagging sends a
-bounded excerpt of each selected session to that provider, so API usage and provider privacy terms
-apply. `PI_RECALL_DATA_DIR` relocates the durable tag/config directory;
-`PI_RECALL_CONFIG_FILE` can point at a specific config file.
+The model must exist in Pi’s registry with credentials configured. Auto-tagging sends a bounded
+session excerpt to that provider (API usage and provider privacy terms apply).
+
+Env overrides:
+
+- `PI_RECALL_DATA_DIR` — durable tag/config directory (default `~/.pi/agent/pi-recall`)
+- `PI_RECALL_CONFIG_FILE` — specific config file path
+
+## Model tool
+
+The agent gets one `recall` tool with actions:
+
+| Action | Purpose |
+| --- | --- |
+| `search` | Full-text search (optional `query`, `scope`, `limit`) |
+| `list` | List sessions (`scope`, `limit`) |
+| `read` | Read a session by id / id prefix / path (`session`, `limit` = latest N messages) |
+
+`scope` is `current` (this folder) or `all` (default for the tool). Output is capped at 800 lines / 40KB.
 
 ## Search behavior
 
-The native search engine behaves as follows:
+- One Tantivy document per normalized user/assistant message, plus a metadata document for each tagged session.
+- Consecutive same-role messages are joined before indexing.
+- Message content and tag text are searchable; IDs, names, and paths are stored metadata.
+- Ordinary terms use OR semantics; tag-text matches get a 4× field boost; multi-token queries also get a 10× exact-phrase OR clause.
+- `#tag` filters are exact. Cwd / allowed-session constraints are applied natively before top-doc collection.
+- Results are grouped by session; near-tied messages prefer later `messageIndex`; session scores get a seven-day recency boost.
+- Snippets are ~200 characters with byte-offset match spans for highlighting.
+- The **picker** prefix-expands an unfinished trailing token (≥2 chars, not a `#tag`, query not ending in whitespace). The **recall tool** keeps exact lexical semantics (no prefix expansion).
 
-- One Tantivy document is indexed per normalized user/assistant message, plus one metadata document
-  for each tagged session.
-- Consecutive messages with the same role are joined before indexing.
-- Message content and tag text are searchable; session IDs, names, and paths remain stored metadata.
-- Tantivy's default `QueryParser` handles ordinary terms with OR semantics. Tag-text matches receive
-  a 4x field boost.
-- `#tag` is an exact session filter. Multiple hashtags use AND, and remaining words still use the
-  normal content/tag query (for example, `authentication #codebase`).
-- Multi-token queries also receive a 10x exact-phrase query joined with the base query using OR.
-- Search retrieves `limit * 10` documents, groups them by session ID, and keeps one representative
-  match per session. Cwd and exact-tag constraints become a native `TermSetQuery`, excluding
-  irrelevant sessions before Tantivy collects its top documents.
-- When message scores are close, later message positions are preferred by `messageIndex * 0.01`.
-- Final session ordering multiplies relevance by `1 + exp(-age / 7 days)`, giving current sessions up
-  to a 2x boost.
-- Snippets come from Tantivy's `SnippetGenerator` with a 200-character target.
-- The picker requests Recall's 50-session limit.
+This is lexical search, not semantic retrieval: no embeddings, stemming, synonyms, or typo edit-distance.
 
-This is lexical search, not semantic retrieval. There is deliberately no prefix search, edit-distance
-typo matching, stemming, synonym expansion, or embedding model layered on top of the results.
+Only user and assistant text (plus tags) are indexed. Thinking blocks, tool calls, and tool output are excluded.
 
-## Storage and incremental refresh
+## Storage
 
-The native index lives under `~/.pi/agent/cache/pi-recall-tantivy-v3/`. File signatures and Pi session
-summaries live in `~/.pi/agent/cache/pi-recall-v3.json`. Set `PI_RECALL_CACHE_DIR` to place both in a
-different directory.
+| Path | Contents |
+| --- | --- |
+| `~/.pi/agent/cache/pi-recall-tantivy-v3/` | Native Tantivy index |
+| `~/.pi/agent/cache/pi-recall-v3.json` | File signatures + session summaries |
+| `~/.pi/agent/pi-recall/tags-v1.json` | Tags (user data; kept across reindex) |
 
-Tags live separately at `~/.pi/agent/pi-recall/tags-v1.json`. This file is user data, not a cache, and
-is intentionally preserved by `/recall-reindex`.
+`PI_RECALL_CACHE_DIR` relocates both cache files. Unreadable sessions are skipped with a warning; searchable sessions remain indexed.
 
-The Pi adapter uses millisecond file timestamps, cache-version validation, atomic state writes,
-corrupt-index recovery, and deletion reconciliation.
+## Local development
 
-Only user and assistant text is indexed alongside tag metadata. Thinking blocks, tool calls, and tool
-output are excluded to avoid duplicated command output.
-
-## Development
+```bash
+git clone https://github.com/joshbochu/pi-recall.git
+cd pi-recall
+npm install
+pi install /absolute/path/to/pi-recall
+# or: pi -e /absolute/path/to/pi-recall
+```
 
 ```bash
 npm run check
@@ -143,53 +143,27 @@ npm run check:native
 npm test
 ```
 
-`npm test` rebuilds the native addon incrementally before running integration tests. Both Node and Bun
-load the generated N-API module.
-
-See [docs/architecture.md](docs/architecture.md) for the component boundaries, native bridge, data
-flow, and operational tradeoffs.
+See [docs/architecture.md](docs/architecture.md) for component boundaries and the native bridge.
 
 ## Publishing
 
 Every push to `main` publishes a new package version via GitHub Actions (`publish.yml`).
-The workflow chooses the next patch version from the greater of `package.json` and the
-latest version on npm, runs the checks, builds and publishes one prebuilt addon package
-per platform (`@joshbochu/pi-recall-native-<target>`), publishes the root package with
-`optionalDependencies` pinned to those addons, then records `release: vX.Y.Z` and tag
-`vX.Y.Z` on `main`. Release commits are skipped so the version bump does not republish.
+The workflow chooses the next patch from `max(package.json, npm latest)`, verifies, publishes
+platform addons when possible, stamps `optionalDependencies` for addons that exist, publishes
+the root package, then records `release: vX.Y.Z` and tag `vX.Y.Z`.
 
-You can also run the workflow manually with **Actions → Publish to npm → Run workflow**.
+Trusted publisher on npm (per package, including each `@joshbochu/pi-recall-native-*`):
 
-Before the first automated release, configure a GitHub Actions trusted publisher on npm for
-`@joshbochu/pi-recall` **and** for each platform package
-(`@joshbochu/pi-recall-native-darwin-arm64`, `-darwin-x64`, `-linux-x64-gnu`,
-`-linux-arm64-gnu`, `-win32-x64-msvc`):
-
-- Organization or user: `joshbochu`
-- Repository: `pi-recall`
-- Workflow filename: `publish.yml`
+- Repository: `joshbochu/pi-recall`
+- Workflow: `publish.yml`
 - Allowed action: `npm publish`
 
-The publish job uses OIDC trusted publishing by default (`scripts/publish-npm.mjs`). Do not set
-an empty `NODE_AUTH_TOKEN`; that disables OIDC. Optionally set repository secret `NPM_TOKEN` when
-you need to create brand-new platform package names (trusted publishing cannot create a package
-that does not exist yet). After those packages exist and have trusted publishers, you can remove
-the token. Until a platform package is on npm, the root publish still proceeds and `postinstall`
-falls back to a local Cargo build for that platform.
+First-time platform package names need a one-shot `NPM_TOKEN` (or a manual first publish), then
+OIDC is enough. Until a platform addon exists, root still publishes and `postinstall` falls back
+to a local Cargo build.
 
-`npm run pack:platform -- <target> [cargo-target]` builds one platform package locally into
-`npm/<target>/`. `node scripts/next-version.mjs` prints the next publish version, and
-`npm run check:release` verifies that any `v*` tag matches the package version and that
-`publish.yml` builds exactly the platforms listed in `scripts/native-targets.mjs`.
-
-`optionalDependencies` is not committed: a lock file cannot reference a version that has not
-been published, so committing it would break `npm ci`. The workflow publishes the platform
-packages first, then runs `npm run stamp:prebuilt` (with `--published-only` in CI), so the
-published tarball only points at addons that exist.
-
-Manual major/minor bumps still work: raise the version in `package.json` (and the lockfile)
-above the latest npm release, merge to `main`, and the workflow publishes that version
-instead of the next patch.
+Helpers: `npm run pack:platform`, `npm run version:next`, `npm run check:release`,
+`npm run stamp:prebuilt`.
 
 ## License
 

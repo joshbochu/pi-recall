@@ -18,6 +18,7 @@ import {
   modelLabel,
   resolveAutoTagModel,
 } from "./auto-tag.js";
+import { HELP_SUBCOMMANDS, RECALL_HELP } from "./help.js";
 import { RecallIndex } from "./recall-index.js";
 import { RECALL_OVERLAY_OPTIONS, RecallPicker } from "./recall-picker.js";
 import { displayTags, parseTags, type SessionTags } from "./tag-store.js";
@@ -226,16 +227,23 @@ export default function recallExtension(pi: ExtensionAPI) {
   };
 
   pi.registerCommand("recall", {
-    description: "Search and resume any Pi session",
+    description: "Search and resume any Pi session (/recall help)",
     handler: async (args, ctx) => {
-      const { index } = await syncIndex(ctx);
       const trimmedArgs = args.trim();
       const [subcommand = "", ...rest] = trimmedArgs.split(/\s+/u);
       const commandArgs = rest.join(" ");
 
+      // Help does not need an index sync; show it before any I/O.
+      if (HELP_SUBCOMMANDS.has(subcommand.toLowerCase()) && rest.length === 0) {
+        if (ctx.hasUI) ctx.ui.notify(RECALL_HELP, "info");
+        return;
+      }
+
+      const { index } = await syncIndex(ctx);
+
       if (subcommand === "tag") {
         const tags = parseTags(commandArgs);
-        if (tags.length === 0) throw new Error("Usage: /recall tag #tag [#another-tag]");
+        if (tags.length === 0) throw new Error("Usage: /recall tag #tag [#another-tag] — /recall help");
         const updated = await index.addManualTags(currentSessionReference(ctx), tags);
         if (ctx.hasUI) ctx.ui.notify(formatTagState(updated), "info");
         return;
@@ -243,7 +251,7 @@ export default function recallExtension(pi: ExtensionAPI) {
 
       if (subcommand === "untag") {
         const tags = parseTags(commandArgs);
-        if (tags.length === 0) throw new Error("Usage: /recall untag #tag [#another-tag]");
+        if (tags.length === 0) throw new Error("Usage: /recall untag #tag [#another-tag] — /recall help");
         const updated = await index.removeTags(currentSessionReference(ctx), tags);
         if (ctx.hasUI) ctx.ui.notify(formatTagState(updated), "info");
         return;
@@ -258,7 +266,7 @@ export default function recallExtension(pi: ExtensionAPI) {
       if (subcommand === "autotag") {
         const allUntagged = rest.includes("--all-untagged");
         const unexpected = rest.filter((arg) => arg !== "--all-untagged");
-        if (unexpected.length) throw new Error("Usage: /recall autotag [--all-untagged]");
+        if (unexpected.length) throw new Error("Usage: /recall autotag [--all-untagged] — /recall help");
         await runAutoTagCommand(allUntagged, ctx, index);
         return;
       }
@@ -306,8 +314,17 @@ export default function recallExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("recall-reindex", {
-    description: "Discard and rebuild the Pi Recall search index",
-    handler: async (_args, ctx) => {
+    description: "Discard and rebuild the Pi Recall search index (tags are kept)",
+    handler: async (args, ctx) => {
+      if (HELP_SUBCOMMANDS.has(args.trim().toLowerCase())) {
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            "Usage: /recall-reindex\nRebuilds the Tantivy index from session files. Tags and config are preserved.\nSee also: /recall help",
+            "info",
+          );
+        }
+        return;
+      }
       const { index, sync } = await syncIndex(ctx, undefined, true);
       const skipped = sync.failed.length > 0 ? `; ${sync.failed.length} unreadable` : "";
       if (ctx.hasUI) {

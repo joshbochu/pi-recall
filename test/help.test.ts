@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { HELP_SUBCOMMANDS, RECALL_HELP } from "../src/help.ts";
+import { HELP_SUBCOMMANDS, RECALL_HELP } from "../src/help.js";
 
 describe("recall help", () => {
   it("documents install, picker, tags, and the help entrypoints", () => {

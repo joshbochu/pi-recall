@@ -5,19 +5,28 @@
 use napi_derive::napi;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tantivy::collector::TopDocs;
+use tantivy::columnar::{Column, StrColumn};
 use tantivy::query::{
-    BooleanQuery, BoostQuery, Occur, PhraseQuery, Query, QueryParser, TermSetQuery,
+    BooleanQuery, BoostQuery, Occur, PhrasePrefixQuery, PhraseQuery, Query, QueryParser,
+    TermSetQuery,
 };
 use tantivy::schema::*;
 use tantivy::snippet::SnippetGenerator;
-use tantivy::{doc, Index, IndexReader, IndexWriter, Order, ReloadPolicy};
+use tantivy::DocAddress;
+use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy};
 
 fn napi_error(error: impl std::fmt::Display) -> napi::Error {
     napi::Error::from_reason(error.to_string())
 }
+
+/// Prefix matching for the token the user is still typing. Deliberately weaker than
+/// a whole-term match, so completed words keep outranking partial ones.
+const PREFIX_BOOST: f32 = 0.5;
+const PREFIX_MAX_EXPANSIONS: u32 = 64;
+const PREFIX_MIN_CHARS: usize = 2;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -74,6 +83,49 @@ struct NativeSearchResult {
     tags: Vec<String>,
 }
 
+/// A session's best matching document, ranked from fast fields alone.
+struct GroupedMatch {
+    address: DocAddress,
+    score: f32,
+    ranked_score: f32,
+    message_index: u64,
+    session_timestamp: i64,
+}
+
+/// Columnar readers for one segment, opened once per search.
+struct SegmentColumns {
+    session_id: Option<StrColumn>,
+    message_index: Column<u64>,
+    session_timestamp: Column<i64>,
+}
+
+impl SegmentColumns {
+    /// Resolve a document's session id, caching each term ordinal's text per segment.
+    fn session_id(
+        &self,
+        cache: &mut HashMap<(u32, u64), String>,
+        segment_ord: u32,
+        doc_id: u32,
+    ) -> tantivy::Result<Option<String>> {
+        let Some(column) = self.session_id.as_ref() else {
+            return Ok(None);
+        };
+        let Some(ord) = column.term_ords(doc_id).next() else {
+            return Ok(None);
+        };
+        if let Some(cached) = cache.get(&(segment_ord, ord)) {
+            return Ok(Some(cached.clone()));
+        }
+        let mut bytes = Vec::new();
+        if !column.ord_to_bytes(ord, &mut bytes)? {
+            return Ok(None);
+        }
+        let session_id = String::from_utf8_lossy(&bytes).into_owned();
+        cache.insert((segment_ord, ord), session_id.clone());
+        Ok(Some(session_id))
+    }
+}
+
 struct SessionIndex {
     index: Index,
     reader: IndexReader,
@@ -95,7 +147,9 @@ struct SessionIndex {
 impl SessionIndex {
     fn build_schema() -> Schema {
         let mut builder = Schema::builder();
-        builder.add_text_field("session_id", STRING | STORED);
+        // session_id and message_index are FAST so grouping by session never touches
+        // the document store: only the results that survive grouping are fetched.
+        builder.add_text_field("session_id", STRING | STORED | FAST);
         builder.add_text_field("file_path", STRING | STORED);
         builder.add_text_field("cwd", STRING | STORED);
         builder.add_i64_field("session_timestamp", INDEXED | STORED | FAST);
@@ -104,7 +158,7 @@ impl SessionIndex {
         builder.add_text_field("tags", STRING | STORED);
         builder.add_text_field("tag_key", STRING | STORED);
         builder.add_text_field("doc_kind", STRING | STORED);
-        builder.add_u64_field("message_index", STORED);
+        builder.add_u64_field("message_index", STORED | FAST);
         builder.add_text_field("role", STRING | STORED);
         builder.add_i64_field("message_timestamp", STORED);
         builder.add_text_field("entry_id", STRING | STORED);
@@ -259,11 +313,30 @@ impl SessionIndex {
         self.reader.searcher().num_docs()
     }
 
+    /// Prefix query for a trailing token, over both searchable fields.
+    fn prefix_query(&self, token: &str) -> Box<dyn Query> {
+        let clauses = [(self.content, 1.0), (self.tag_text, 4.0)]
+            .into_iter()
+            .map(|(field, boost)| {
+                let mut prefix =
+                    PhrasePrefixQuery::new(vec![tantivy::Term::from_field_text(field, token)]);
+                prefix.set_max_expansions(PREFIX_MAX_EXPANSIONS);
+                let clause: Box<dyn Query> = Box::new(BoostQuery::new(Box::new(prefix), boost));
+                (Occur::Should, clause)
+            })
+            .collect();
+        Box::new(BoostQuery::new(
+            Box::new(BooleanQuery::new(clauses)),
+            PREFIX_BOOST,
+        ))
+    }
+
     fn search(
         &self,
         query_str: &str,
         limit: usize,
         allowed_session_ids: Option<&[String]>,
+        prefix_last_token: bool,
     ) -> tantivy::Result<Vec<NativeSearchResult>> {
         if query_str.trim().is_empty() || limit == 0 {
             return Ok(Vec::new());
@@ -278,32 +351,47 @@ impl SessionIndex {
         query_parser.set_field_boost(self.tag_text, 4.0);
         let base_query = query_parser.parse_query(query_str)?;
 
+        let mut tokens: Vec<(usize, String)> = Vec::new();
+        if let Some(mut tokenizer) = self.index.tokenizers().get("default") {
+            let mut token_stream = tokenizer.token_stream(query_str);
+            token_stream.process(&mut |token| tokens.push((token.position, token.text.clone())));
+        }
+
         // This is intentionally kept in lockstep with Recall's SessionIndex::search:
         // a 10x exact-phrase query is ORed with Tantivy's parsed base query.
-        let lexical_query: Box<dyn Query> =
-            if let Some(mut tokenizer) = self.index.tokenizers().get("default") {
-                let mut terms: Vec<(usize, tantivy::Term)> = Vec::new();
-                let mut token_stream = tokenizer.token_stream(query_str);
-                token_stream.process(&mut |token| {
-                    terms.push((
-                        token.position,
-                        tantivy::Term::from_field_text(self.content, &token.text),
-                    ));
-                });
+        let mut lexical_query: Box<dyn Query> = if tokens.len() > 1 {
+            let terms = tokens
+                .iter()
+                .map(|(position, text)| {
+                    (
+                        *position,
+                        tantivy::Term::from_field_text(self.content, text),
+                    )
+                })
+                .collect();
+            let phrase_query = PhraseQuery::new_with_offset(terms);
+            let boosted_phrase = BoostQuery::new(Box::new(phrase_query), 10.0);
+            Box::new(BooleanQuery::new(vec![
+                (Occur::Should, Box::new(boosted_phrase) as Box<dyn Query>),
+                (Occur::Should, base_query),
+            ]))
+        } else {
+            base_query
+        };
 
-                if terms.len() > 1 {
-                    let phrase_query = PhraseQuery::new_with_offset(terms);
-                    let boosted_phrase = BoostQuery::new(Box::new(phrase_query), 10.0);
-                    Box::new(BooleanQuery::new(vec![
-                        (Occur::Should, Box::new(boosted_phrase) as Box<dyn Query>),
-                        (Occur::Should, base_query),
-                    ]))
-                } else {
-                    base_query
-                }
-            } else {
-                base_query
-            };
+        // Interactive typing: the final token is still being typed unless the caller
+        // already ended it with whitespace, so match it as a prefix too.
+        let typing_token = tokens
+            .last()
+            .map(|(_, text)| text.as_str())
+            .filter(|_| prefix_last_token && !query_str.ends_with(char::is_whitespace))
+            .filter(|text| text.chars().count() >= PREFIX_MIN_CHARS);
+        if let Some(token) = typing_token {
+            lexical_query = Box::new(BooleanQuery::new(vec![
+                (Occur::Should, lexical_query),
+                (Occur::Should, self.prefix_query(token)),
+            ]));
+        }
         let query: Box<dyn Query> = if let Some(session_ids) = allowed_session_ids {
             let allowed_query = TermSetQuery::new(
                 session_ids
@@ -318,64 +406,57 @@ impl SessionIndex {
             lexical_query
         };
 
-        let mut snippet_generator = SnippetGenerator::create(&searcher, &*query, self.content)?;
-        snippet_generator.set_max_num_chars(200);
-
-        // Recall intentionally over-fetches message documents before grouping.
+        // Recall intentionally over-fetches message documents before grouping. Grouping
+        // and ranking read fast fields only; the document store, which holds every
+        // message body, is touched once per returned session instead of once per
+        // over-fetched document.
         let top_docs = searcher.search(&query, &TopDocs::with_limit(limit.saturating_mul(10)))?;
-        let mut grouped: HashMap<String, (f32, NativeSearchResult)> = HashMap::new();
+        let mut columns_by_segment: HashMap<u32, SegmentColumns> = HashMap::new();
+        let mut session_ids: HashMap<(u32, u64), String> = HashMap::new();
+        let mut grouped: HashMap<String, GroupedMatch> = HashMap::new();
 
-        for (score, doc_addr) in top_docs {
-            let document: TantivyDocument = searcher.doc(doc_addr)?;
-            let session_id = text_field(&document, self.session_id);
-            let message_index = u64_field(&document, self.message_index);
-            let is_tag_match = text_field(&document, self.doc_kind) == "tag";
-            let tags = text_fields(&document, self.tags);
-            let (snippet, match_spans) = if is_tag_match {
-                (
-                    tags.iter()
-                        .map(|tag| format!("#{tag}"))
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                    Vec::new(),
-                )
-            } else {
-                let tantivy_snippet = snippet_generator.snippet_from_doc(&document);
-                (
-                    tantivy_snippet.fragment().replace('\n', " "),
-                    tantivy_snippet
-                        .highlighted()
-                        .iter()
-                        .map(|range| (range.start, range.end))
-                        .collect(),
-                )
+        for (score, address) in top_docs {
+            let columns = match columns_by_segment.entry(address.segment_ord) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let fast_fields = searcher.segment_reader(address.segment_ord).fast_fields();
+                    entry.insert(SegmentColumns {
+                        session_id: fast_fields.str("session_id")?,
+                        message_index: fast_fields.u64("message_index")?,
+                        session_timestamp: fast_fields.i64("session_timestamp")?,
+                    })
+                }
             };
-            let result = NativeSearchResult {
-                session_id: session_id.clone(),
-                path: text_field(&document, self.file_path),
-                cwd: text_field(&document, self.cwd),
-                session_timestamp: i64_field(&document, self.session_timestamp)
-                    .saturating_mul(1_000),
-                score,
-                matched_message_index: message_index,
-                role: text_field(&document, self.role),
-                message_timestamp: i64_field(&document, self.message_timestamp),
-                entry_id: text_field(&document, self.entry_id),
-                snippet,
-                match_spans,
-                tags,
+            let Some(session_id) =
+                columns.session_id(&mut session_ids, address.segment_ord, address.doc_id)?
+            else {
+                continue;
             };
+            let message_index = columns.message_index.first(address.doc_id).unwrap_or(0);
+            let session_timestamp = columns.session_timestamp.first(address.doc_id).unwrap_or(0);
+            // Later messages win ties, matching Recall's matched-message recency bonus.
+            let ranked_score = score + message_index as f32 * 0.01;
 
             grouped
                 .entry(session_id)
-                .and_modify(|(existing_score, existing_result)| {
-                    let message_recency_bonus = message_index as f32 * 0.01;
-                    if score + message_recency_bonus > *existing_score {
-                        *existing_score = score + message_recency_bonus;
-                        *existing_result = result.clone();
+                .and_modify(|existing| {
+                    if ranked_score > existing.ranked_score {
+                        *existing = GroupedMatch {
+                            address,
+                            score,
+                            ranked_score,
+                            message_index,
+                            session_timestamp,
+                        };
                     }
                 })
-                .or_insert((score, result));
+                .or_insert(GroupedMatch {
+                    address,
+                    score,
+                    ranked_score,
+                    message_index,
+                    session_timestamp,
+                });
         }
 
         let now = SystemTime::now()
@@ -383,72 +464,70 @@ impl SessionIndex {
             .unwrap_or_default()
             .as_secs_f64();
         let half_life_secs = 7.0 * 24.0 * 3_600.0;
-        let mut results: Vec<_> = grouped.into_values().map(|(_, result)| result).collect();
-        results.sort_by(|left, right| {
-            let left_age = (now - left.session_timestamp as f64 / 1_000.0).max(0.0);
-            let right_age = (now - right.session_timestamp as f64 / 1_000.0).max(0.0);
-            let left_recency = 1.0 + (-left_age / half_life_secs).exp();
-            let right_recency = 1.0 + (-right_age / half_life_secs).exp();
-            let left_final = left.score as f64 * left_recency;
-            let right_final = right.score as f64 * right_recency;
+        let recency_weight = |timestamp_secs: i64| -> f64 {
+            let age = (now - timestamp_secs as f64).max(0.0);
+            1.0 + (-age / half_life_secs).exp()
+        };
+        let mut ranked: Vec<GroupedMatch> = grouped.into_values().collect();
+        ranked.sort_by(|left, right| {
+            let left_final = left.score as f64 * recency_weight(left.session_timestamp);
+            let right_final = right.score as f64 * recency_weight(right.session_timestamp);
             right_final
                 .partial_cmp(&left_final)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        results.truncate(limit);
-        Ok(results)
+        ranked.truncate(limit);
+
+        let mut snippet_generator = SnippetGenerator::create(&searcher, &*query, self.content)?;
+        snippet_generator.set_max_num_chars(200);
+        ranked
+            .into_iter()
+            .map(|matched| self.hydrate(&searcher, &snippet_generator, &matched))
+            .collect()
     }
 
-    fn recent(&self, limit: usize) -> tantivy::Result<Vec<NativeSearchResult>> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let searcher = self.reader.searcher();
-        let top_docs = searcher.search(
-            &tantivy::query::AllQuery,
-            &TopDocs::with_limit(limit.saturating_mul(100))
-                .order_by_fast_field::<i64>("session_timestamp", Order::Desc),
-        )?;
-        let mut grouped: HashMap<String, NativeSearchResult> = HashMap::new();
-
-        for (_timestamp, doc_addr) in top_docs {
-            let document: TantivyDocument = searcher.doc(doc_addr)?;
-            let session_id = text_field(&document, self.session_id);
-            if grouped.contains_key(&session_id) {
-                continue;
-            }
-            let content = text_field(&document, self.content);
-            grouped.insert(
-                session_id.clone(),
-                NativeSearchResult {
-                    session_id,
-                    path: text_field(&document, self.file_path),
-                    cwd: text_field(&document, self.cwd),
-                    session_timestamp: i64_field(&document, self.session_timestamp)
-                        .saturating_mul(1_000),
-                    score: 0.0,
-                    matched_message_index: u64_field(&document, self.message_index),
-                    role: text_field(&document, self.role),
-                    message_timestamp: i64_field(&document, self.message_timestamp),
-                    entry_id: text_field(&document, self.entry_id),
-                    snippet: content
-                        .chars()
-                        .take(200)
-                        .collect::<String>()
-                        .replace('\n', " "),
-                    match_spans: Vec::new(),
-                    tags: text_fields(&document, self.tags),
-                },
-            );
-            if grouped.len() >= limit {
-                break;
-            }
-        }
-
-        let mut results: Vec<_> = grouped.into_values().collect();
-        results.sort_by(|left, right| right.session_timestamp.cmp(&left.session_timestamp));
-        results.truncate(limit);
-        Ok(results)
+    /// Read the stored fields for one grouped match. Called only for returned results.
+    fn hydrate(
+        &self,
+        searcher: &tantivy::Searcher,
+        snippet_generator: &SnippetGenerator,
+        matched: &GroupedMatch,
+    ) -> tantivy::Result<NativeSearchResult> {
+        let document: TantivyDocument = searcher.doc(matched.address)?;
+        let tags = text_fields(&document, self.tags);
+        let (snippet, match_spans) = if text_field(&document, self.doc_kind) == "tag" {
+            (
+                tags.iter()
+                    .map(|tag| format!("#{tag}"))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                Vec::new(),
+            )
+        } else {
+            let tantivy_snippet = snippet_generator.snippet_from_doc(&document);
+            (
+                tantivy_snippet.fragment().replace('\n', " "),
+                tantivy_snippet
+                    .highlighted()
+                    .iter()
+                    .map(|range| (range.start, range.end))
+                    .collect(),
+            )
+        };
+        Ok(NativeSearchResult {
+            session_id: text_field(&document, self.session_id),
+            path: text_field(&document, self.file_path),
+            cwd: text_field(&document, self.cwd),
+            session_timestamp: matched.session_timestamp.saturating_mul(1_000),
+            score: matched.score,
+            matched_message_index: matched.message_index,
+            role: text_field(&document, self.role),
+            message_timestamp: i64_field(&document, self.message_timestamp),
+            entry_id: text_field(&document, self.entry_id),
+            snippet,
+            match_spans,
+            tags,
+        })
     }
 }
 
@@ -474,26 +553,17 @@ fn i64_field(document: &TantivyDocument, field: Field) -> i64 {
         .unwrap_or(0)
 }
 
-fn u64_field(document: &TantivyDocument, field: Field) -> u64 {
-    document
-        .get_first(field)
-        .and_then(|value| value.as_u64())
-        .unwrap_or(0)
-}
-
 #[napi]
 pub struct RecallNative {
     index: SessionIndex,
-    index_path: PathBuf,
 }
 
 #[napi]
 impl RecallNative {
     #[napi(constructor)]
     pub fn new(index_path: String) -> napi::Result<Self> {
-        let index_path = PathBuf::from(index_path);
-        let index = SessionIndex::open_or_create(&index_path).map_err(napi_error)?;
-        Ok(Self { index, index_path })
+        let index = SessionIndex::open_or_create(Path::new(&index_path)).map_err(napi_error)?;
+        Ok(Self { index })
     }
 
     #[napi(js_name = "applyChanges")]
@@ -525,25 +595,20 @@ impl RecallNative {
         query: String,
         limit: u32,
         allowed_session_ids_json: Option<String>,
+        prefix_last_token: Option<bool>,
     ) -> napi::Result<String> {
         let allowed_session_ids = allowed_session_ids_json
             .map(|json| serde_json::from_str::<Vec<String>>(&json).map_err(napi_error))
             .transpose()?;
         let results = self
             .index
-            .search(&query, limit as usize, allowed_session_ids.as_deref())
+            .search(
+                &query,
+                limit as usize,
+                allowed_session_ids.as_deref(),
+                prefix_last_token.unwrap_or(false),
+            )
             .map_err(napi_error)?;
         serde_json::to_string(&results).map_err(napi_error)
-    }
-
-    #[napi]
-    pub fn recent(&self, limit: u32) -> napi::Result<String> {
-        let results = self.index.recent(limit as usize).map_err(napi_error)?;
-        serde_json::to_string(&results).map_err(napi_error)
-    }
-
-    #[napi(js_name = "indexPath")]
-    pub fn index_path(&self) -> String {
-        self.index_path.to_string_lossy().into_owned()
     }
 }

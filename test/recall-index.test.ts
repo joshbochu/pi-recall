@@ -1,8 +1,8 @@
-import { appendFile, mkdir, mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { RecallIndex } from "../src/recall-index.js";
+import { RecallIndex, toNativeSession, toNativeTagInput } from "../src/recall-index.js";
 
 const temporaryRoots: string[] = [];
 
@@ -75,6 +75,49 @@ afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
+describe("native input conversion", () => {
+  const fractional = 1_780_966_757_402.787;
+
+  it("squares off timestamps that the native i64 fields would reject", () => {
+    const session = {
+      id: "session-first",
+      path: "/sessions/first.jsonl",
+      cwd: "/work/app",
+      created: fractional,
+      modified: fractional,
+      messageCount: 1,
+      firstMessage: "hello",
+    };
+    const native = toNativeSession(
+      {
+        summary: session,
+        documents: [
+          {
+            id: "doc",
+            sessionId: session.id,
+            sessionPath: session.path,
+            sessionName: "",
+            cwd: session.cwd,
+            role: "user" as const,
+            content: "hello",
+            timestamp: fractional,
+            entryId: "entry",
+            messageIndex: 0,
+          },
+        ],
+      },
+      [],
+    );
+    expect(native.timestamp).toBe(1_780_966_757_402);
+    expect(native.messages[0]!.timestamp).toBe(1_780_966_757_402);
+
+    // Tag documents take their timestamp from a cached summary, which may predate
+    // the parser truncation.
+    expect(toNativeTagInput(session, ["codebase"]).timestamp).toBe(1_780_966_757_402);
+    expect(toNativeTagInput({ ...session, modified: Number.NaN }, []).timestamp).toBe(0);
+  });
+});
+
 describe("RecallIndex", () => {
   it("indexes, ranks, filters, updates, persists, and removes sessions", async () => {
     const fixture = await createFixture();
@@ -139,6 +182,59 @@ describe("RecallIndex", () => {
     expect(removal.removed).toBe(1);
     expect(reloaded.sessionCount).toBe(1);
     expect(reloaded.search("database migration")).toEqual([]);
+  });
+
+  it("prefix-matches the token being typed, only when asked", async () => {
+    const fixture = await createFixture();
+    const index = await RecallIndex.open({
+      agentDir: fixture.agentDir,
+      cacheFile: join(fixture.root, "prefix.json"),
+      indexDir: join(fixture.root, "cache", "tantivy-prefix"),
+    });
+    await index.sync();
+    const ids = (query: string, prefixLastToken = false) =>
+      index.search(query, { scope: "all", prefixLastToken }).map((result) => result.session.id);
+
+    // Lexical search alone finds nothing until the word is complete.
+    expect(ids("stagin")).toEqual([]);
+    expect(ids("stagin", true)).toEqual(["session-first"]);
+    expect(ids("migratio", true)).toEqual(["session-second"]);
+    expect(ids("deploy stagin", true)).toEqual(["session-first"]);
+
+    // A trailing space means the user finished that token: no prefix expansion.
+    expect(ids("stagin ", true)).toEqual([]);
+    // Single characters are too broad to expand.
+    expect(ids("s", true)).toEqual([]);
+    // Whole-word matches still outrank prefix-only matches.
+    expect(ids("migration deplo", true)).toEqual(["session-second", "session-first"]);
+
+    await index.addManualTags("session-first", ["codebase"]);
+    expect(ids("codeba", true)).toEqual(["session-first"]);
+    // A trailing hashtag is an exact filter, never a prefix.
+    expect(ids("#codeba", true)).toEqual([]);
+  });
+
+  // Unreadable-file behavior cannot be provoked as root, which can read anything.
+  it.skipIf(process.getuid?.() === 0)("reports unreadable session files instead of dropping them silently", async () => {
+    const fixture = await createFixture();
+    const brokenPath = join(fixture.agentDir, "sessions", "--work-app--", "broken.jsonl");
+    await writeFile(brokenPath, sessionContent("session-broken", "/work/app", []));
+    await chmod(brokenPath, 0o000);
+    const index = await RecallIndex.open({
+      agentDir: fixture.agentDir,
+      cacheFile: join(fixture.root, "failed.json"),
+      indexDir: join(fixture.root, "cache", "tantivy-failed"),
+    });
+
+    const result = await index.sync();
+    expect(result.discovered).toBe(3);
+    expect(result.indexed).toBe(2);
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0]!.path).toContain("broken.jsonl");
+    expect(result.failed[0]!.error).toBeTruthy();
+    // The readable sessions are still searchable.
+    expect(index.search("deploy staging", { scope: "all" })).toHaveLength(1);
+    await chmod(brokenPath, 0o600);
   });
 
   it("resolves and reads sessions by a unique ID prefix", async () => {

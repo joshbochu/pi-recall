@@ -8,11 +8,13 @@ engine.
 
 ## Prerequisites and install
 
-The package builds a platform-native addon during installation, so Rust and Cargo must be available.
-
 ```bash
 pi install npm:@joshbochu/pi-recall
 ```
+
+Installation uses a prebuilt addon for macOS (arm64, x64), Linux (x64, arm64, glibc) and
+Windows (x64). On any other platform the addon is compiled during installation, which
+requires Rust and Cargo; the installer says so rather than failing inside `cargo`.
 
 For local development or installation from a checkout:
 
@@ -120,7 +122,7 @@ typo matching, stemming, synonym expansion, or embedding model layered on top of
 
 ## Storage and incremental refresh
 
-The native index lives under `~/.pi/agent/cache/pi-recall-tantivy-v2/`. File signatures and Pi session
+The native index lives under `~/.pi/agent/cache/pi-recall-tantivy-v3/`. File signatures and Pi session
 summaries live in `~/.pi/agent/cache/pi-recall-v3.json`. Set `PI_RECALL_CACHE_DIR` to place both in a
 different directory.
 
@@ -149,13 +151,30 @@ flow, and operational tradeoffs.
 
 ## Publishing
 
-Publishing is handled by GitHub Actions when a GitHub Release is published. Before the first
-automated release, configure `@joshbochu/pi-recall` on npm with a GitHub Actions trusted publisher:
+Publishing is handled by GitHub Actions when a GitHub Release is published. The workflow runs
+the checks, then builds and publishes one prebuilt addon package per platform
+(`@joshbochu/pi-recall-native-<target>`), then publishes the root package, whose
+`optionalDependencies` pin those addons to the same version.
+
+Before the first automated release, configure a GitHub Actions trusted publisher on npm for
+`@joshbochu/pi-recall` **and** for each platform package
+(`@joshbochu/pi-recall-native-darwin-arm64`, `-darwin-x64`, `-linux-x64-gnu`,
+`-linux-arm64-gnu`, `-win32-x64-msvc`):
 
 - Organization or user: `joshbochu`
 - Repository: `pi-recall`
 - Workflow filename: `publish.yml`
 - Allowed action: `npm publish`
+
+`npm run pack:platform -- <target> [cargo-target]` builds one platform package locally into
+`npm/<target>/`, and `npm run check:release -- <tag>` verifies that the tag matches the
+package version and that `publish.yml` builds exactly the platforms listed in
+`scripts/native-targets.mjs`.
+
+`optionalDependencies` is not committed: a lock file cannot reference a version that has not
+been published, so committing it would break `npm ci`. The workflow publishes the platform
+packages first, then runs `npm run stamp:prebuilt`, so the published tarball always points at
+addons that exist.
 
 To release, update the version in `package.json` and `package-lock.json`, merge that change, and
 publish a GitHub Release whose tag is the same version prefixed with `v` (for example, `v0.4.0`).

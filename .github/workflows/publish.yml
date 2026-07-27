@@ -9,7 +9,7 @@ permissions:
   id-token: write
 
 jobs:
-  publish:
+  verify:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -19,17 +19,10 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: "24"
-          registry-url: https://registry.npmjs.org
           package-manager-cache: false
 
-      - name: Verify release version
-        shell: bash
-        run: |
-          package_version="$(node -p "require('./package.json').version")"
-          if [[ "${GITHUB_REF_NAME}" != "v${package_version}" ]]; then
-            echo "Release tag ${GITHUB_REF_NAME} does not match package version v${package_version}."
-            exit 1
-          fi
+      - name: Verify release version and platform package versions
+        run: node scripts/check-release.mjs
 
       - name: Install dependencies
         run: npm ci
@@ -42,6 +35,73 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+  publish-native:
+    needs: verify
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: darwin-arm64
+            cargo-target: aarch64-apple-darwin
+            runs-on: macos-14
+          - target: darwin-x64
+            cargo-target: x86_64-apple-darwin
+            runs-on: macos-14
+          - target: linux-x64-gnu
+            cargo-target: x86_64-unknown-linux-gnu
+            runs-on: ubuntu-latest
+          - target: linux-arm64-gnu
+            cargo-target: aarch64-unknown-linux-gnu
+            runs-on: ubuntu-latest
+          - target: win32-x64-msvc
+            cargo-target: x86_64-pc-windows-msvc
+            runs-on: windows-latest
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.cargo-target }}
+
+      - name: Install aarch64 cross linker
+        if: matrix.target == 'linux-arm64-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Build platform package
+        run: node scripts/pack-platform.mjs ${{ matrix.target }} ${{ matrix.cargo-target }}
+
+      - name: Publish platform package
+        run: npm publish --access public
+        working-directory: npm/${{ matrix.target }}
+
+  publish:
+    needs: publish-native
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Pin the prebuilt addons published above
+        run: npm run stamp:prebuilt
 
       - name: Publish package
         run: npm publish --access public

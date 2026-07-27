@@ -51,9 +51,12 @@ export interface NativeRecallEngine {
   applyTagChanges(changesJson: string): void;
   reset(): void;
   documentCount(): number;
-  search(query: string, limit: number, allowedSessionIdsJson?: string): string;
-  recent(limit: number): string;
-  indexPath(): string;
+  search(
+    query: string,
+    limit: number,
+    allowedSessionIdsJson?: string,
+    prefixLastToken?: boolean,
+  ): string;
 }
 
 interface NativeBinding {
@@ -65,12 +68,57 @@ function isNativeBinding(value: unknown): value is NativeBinding {
   return typeof (value as { RecallNative?: unknown }).RecallNative === "function";
 }
 
+/**
+ * Platform key for the prebuilt addon packages, matching napi-rs naming.
+ * Exported for tests; `libc` distinguishes glibc from musl on Linux.
+ */
+export function nativeTarget(
+  platform: string = process.platform,
+  arch: string = process.arch,
+  libc: "glibc" | "musl" = detectLibc(),
+): string {
+  if (platform === "win32") return `win32-${arch}-msvc`;
+  if (platform === "linux") return `linux-${arch}-${libc === "musl" ? "musl" : "gnu"}`;
+  return `${platform}-${arch}`;
+}
+
+function detectLibc(): "glibc" | "musl" {
+  if (process.platform !== "linux") return "glibc";
+  const report = process.report?.getReport?.();
+  const header = (report as { header?: { glibcVersionRuntime?: string } } | undefined)?.header;
+  return header?.glibcVersionRuntime ? "glibc" : "musl";
+}
+
+export function prebuiltPackageName(target: string = nativeTarget()): string {
+  return `@joshbochu/pi-recall-native-${target}`;
+}
+
+/**
+ * Load the addon: a published prebuilt for this platform first, then a local
+ * `npm run build:native` result. Both are reported when neither is present,
+ * because the difference decides whether the user needs Rust installed.
+ */
 export function openNativeEngine(indexPath: string): NativeRecallEngine {
   const require = createRequire(import.meta.url);
-  const bindingPath = fileURLToPath(new URL("../native/pi-recall-native-v2.node", import.meta.url));
-  const binding: unknown = require(bindingPath);
-  if (!isNativeBinding(binding)) throw new Error(`Invalid pi-recall native binding: ${bindingPath}`);
-  return new binding.RecallNative(indexPath);
+  const prebuilt = prebuiltPackageName();
+  const localPath = fileURLToPath(new URL("../native/pi-recall-native-v2.node", import.meta.url));
+  const attempts: string[] = [];
+
+  for (const candidate of [prebuilt, localPath]) {
+    let binding: unknown;
+    try {
+      binding = require(candidate);
+    } catch (error) {
+      attempts.push(`${candidate}: ${error instanceof Error ? error.message.split("\n")[0] : String(error)}`);
+      continue;
+    }
+    if (!isNativeBinding(binding)) throw new Error(`Invalid pi-recall native binding: ${candidate}`);
+    return new binding.RecallNative(indexPath);
+  }
+
+  throw new Error(
+    `Unable to load the pi-recall native addon for ${nativeTarget()}. Install the prebuilt package or run "npm run build:native" (needs Rust). Tried:\n  ${attempts.join("\n  ")}`,
+  );
 }
 
 export function parseNativeResults(json: string): NativeSearchResult[] {

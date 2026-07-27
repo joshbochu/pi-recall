@@ -4,3 +4,4 @@ dist/
 *.log
 native/target/
 native/pi-recall-native*.node
+npm/

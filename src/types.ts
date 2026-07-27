@@ -75,6 +75,11 @@ export interface SearchOptions {
   scope?: RecallScope;
   limit?: number;
   matchesPerSession?: number;
+  /**
+   * Also match the final query token as a prefix, for as-you-type search.
+   * Ignored when the query ends with whitespace: that token is finished.
+   */
+  prefixLastToken?: boolean;
 }
 
 export interface RecallIndexOptions {

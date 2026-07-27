@@ -1,4 +1,5 @@
-import { join, resolve } from "node:path";
+import { rm } from "node:fs/promises";
+import { basename, join, resolve } from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import {
   BorderedLoader,
@@ -18,9 +19,9 @@ import {
   resolveAutoTagModel,
 } from "./auto-tag.js";
 import { RecallIndex } from "./recall-index.js";
-import { RecallPicker } from "./recall-picker.js";
+import { RECALL_OVERLAY_OPTIONS, RecallPicker } from "./recall-picker.js";
 import { displayTags, parseTags, type SessionTags } from "./tag-store.js";
-import type { RecallScope, SyncProgress } from "./types.js";
+import type { RecallScope, SyncProgress, SyncResult } from "./types.js";
 
 const TOOL_OUTPUT_LINES = Math.min(DEFAULT_MAX_LINES, 800);
 const TOOL_OUTPUT_BYTES = Math.min(DEFAULT_MAX_BYTES, 40_000);
@@ -28,6 +29,7 @@ const TOOL_OUTPUT_BYTES = Math.min(DEFAULT_MAX_BYTES, 40_000);
 interface RecallPaths {
   cacheFile?: string;
   indexDir?: string;
+  legacyIndexDir: string;
   tagFile: string;
   configFile: string;
 }
@@ -37,7 +39,10 @@ function getRecallPaths(agentDir: string): RecallPaths {
   const dataDir = resolve(process.env.PI_RECALL_DATA_DIR?.trim() || join(agentDir, "pi-recall"));
   return {
     cacheFile: cacheDir ? resolve(cacheDir, "state-v3.json") : undefined,
-    indexDir: cacheDir ? resolve(cacheDir, "tantivy-v2") : undefined,
+    indexDir: cacheDir ? resolve(cacheDir, "tantivy-v3") : undefined,
+    legacyIndexDir: cacheDir
+      ? resolve(cacheDir, "tantivy-v2")
+      : join(agentDir, "cache", "pi-recall-tantivy-v2"),
     tagFile: resolve(dataDir, "tags-v1.json"),
     configFile: resolve(process.env.PI_RECALL_CONFIG_FILE?.trim() || join(dataDir, "config.json")),
   };
@@ -55,6 +60,13 @@ function scopeOf(value: string | undefined, fallback: RecallScope): RecallScope 
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** First few unreadable session paths, so a warning is actionable. */
+function describeFailures(failures: SyncResult["failed"]): string {
+  const shown = failures.slice(0, 3).map((failure) => `${basename(failure.path)} (${failure.error})`);
+  const remaining = failures.length - shown.length;
+  return remaining > 0 ? `${shown.join(", ")} and ${remaining} more` : shown.join(", ");
 }
 
 function formatTagState(tags: SessionTags): string {
@@ -95,10 +107,13 @@ export default function recallExtension(pi: ExtensionAPI) {
   const recallPaths = getRecallPaths(agentDir);
 
   const getIndex = (): Promise<RecallIndex> => {
-    indexPromise ??= RecallIndex.open({
-      agentDir,
-      ...recallPaths,
-    });
+    indexPromise ??= (async () => {
+      // The v2 index predates the fast fields used for grouping and is rebuilt as
+      // v3; leaving it behind would keep a full copy of the corpus on disk.
+      const { legacyIndexDir, ...paths } = recallPaths;
+      await rm(legacyIndexDir, { recursive: true, force: true }).catch(() => {});
+      return RecallIndex.open({ agentDir, ...paths });
+    })();
     return indexPromise;
   };
 
@@ -188,16 +203,23 @@ export default function recallExtension(pi: ExtensionAPI) {
     ctx: ExtensionContext,
     onProgress?: (progress: SyncProgress) => void,
     force = false,
-  ): Promise<RecallIndex> => {
+  ): Promise<{ index: RecallIndex; sync: SyncResult }> => {
     const index = await getIndex();
     const progress = (value: SyncProgress): void => {
       onProgress?.(value);
       if (ctx.hasUI && value.total > 0) ctx.ui.setStatus("pi-recall", `Recall ${value.indexed}/${value.total}`);
     };
     try {
-      if (force) await index.rebuild(progress);
-      else await index.sync(progress);
-      return index;
+      const sync = force ? await index.rebuild(progress) : await index.sync(progress);
+      // Unreadable sessions are skipped silently otherwise, which looks like missing history.
+      if (sync.failed.length > 0 && ctx.hasUI) {
+        const noun = sync.failed.length === 1 ? "session" : "sessions";
+        ctx.ui.notify(
+          `Recall skipped ${sync.failed.length} unreadable ${noun}: ${describeFailures(sync.failed)}`,
+          "warning",
+        );
+      }
+      return { index, sync };
     } finally {
       if (ctx.hasUI) ctx.ui.setStatus("pi-recall", undefined);
     }
@@ -206,7 +228,7 @@ export default function recallExtension(pi: ExtensionAPI) {
   pi.registerCommand("recall", {
     description: "Search and resume any Pi session",
     handler: async (args, ctx) => {
-      const index = await syncIndex(ctx);
+      const { index } = await syncIndex(ctx);
       const trimmedArgs = args.trim();
       const [subcommand = "", ...rest] = trimmedArgs.split(/\s+/u);
       const commandArgs = rest.join(" ");
@@ -256,32 +278,41 @@ export default function recallExtension(pi: ExtensionAPI) {
         return;
       }
 
+      const currentSessionPath = ctx.sessionManager.getSessionFile();
+      // Opening scoped to a folder with no sessions would show an empty picker.
+      const initialScope =
+        index.countSessions({ cwd: ctx.cwd, scope: "current" }) === 0 ? "all" : "current";
       const selectedPath = await ctx.ui.custom<string | undefined>(
-        (_tui, theme, keybindings, done) =>
+        (tui, theme, keybindings, done) =>
           new RecallPicker({
             index,
             cwd: ctx.cwd,
             initialQuery,
-            currentSessionPath: ctx.sessionManager.getSessionFile(),
+            initialScope,
+            ...(currentSessionPath ? { currentSessionPath } : {}),
+            tui,
             theme,
             keybindings,
             done,
           }),
-        {
-          overlay: true,
-          overlayOptions: { anchor: "center", width: "90%", maxHeight: "85%", margin: 1 },
-        },
+        { overlay: true, overlayOptions: RECALL_OVERLAY_OPTIONS },
       );
 
-      if (selectedPath) await ctx.switchSession(selectedPath);
+      // Switching to the session already open would restart it for no reason.
+      if (selectedPath && selectedPath !== ctx.sessionManager.getSessionFile()) {
+        await ctx.switchSession(selectedPath);
+      }
     },
   });
 
   pi.registerCommand("recall-reindex", {
     description: "Discard and rebuild the Pi Recall search index",
     handler: async (_args, ctx) => {
-      const index = await syncIndex(ctx, undefined, true);
-      if (ctx.hasUI) ctx.ui.notify(`Recall indexed ${index.sessionCount} sessions`, "info");
+      const { index, sync } = await syncIndex(ctx, undefined, true);
+      const skipped = sync.failed.length > 0 ? `; ${sync.failed.length} unreadable` : "";
+      if (ctx.hasUI) {
+        ctx.ui.notify(`Recall indexed ${index.sessionCount} sessions${skipped}`, "info");
+      }
     },
   });
 
@@ -312,7 +343,7 @@ export default function recallExtension(pi: ExtensionAPI) {
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       if (signal?.aborted) throw new Error("Recall cancelled");
       let lastUpdate = 0;
-      const index = await syncIndex(ctx, (progress) => {
+      const { index, sync } = await syncIndex(ctx, (progress) => {
         if (progress.indexed - lastUpdate < 20 && progress.indexed !== progress.total) return;
         lastUpdate = progress.indexed;
         onUpdate?.({
@@ -345,9 +376,19 @@ export default function recallExtension(pi: ExtensionAPI) {
         count = parsed.documents.length;
       }
 
+      const unreadable = sync.failed.length;
       return {
-        content: [{ type: "text", text: truncateToolOutput(output) }],
-        details: { action: params.action, count, scope },
+        content: [
+          {
+            type: "text",
+            text: truncateToolOutput(
+              unreadable > 0
+                ? `${output}\n\n[${unreadable} session file(s) could not be read and are missing from these results.]`
+                : output,
+            ),
+          },
+        ],
+        details: { action: params.action, count, scope, unreadable },
       };
     },
   });

@@ -48,9 +48,9 @@ function getHeader(entries: FileEntry[], path: string): SessionHeader {
 
 function timestampOf(entry: SessionMessageEntry, fallback: number): number {
   const messageTimestamp = entry.message.timestamp;
-  if (typeof messageTimestamp === "number" && Number.isFinite(messageTimestamp)) return messageTimestamp;
+  if (typeof messageTimestamp === "number" && Number.isFinite(messageTimestamp)) return Math.trunc(messageTimestamp);
   const parsed = Date.parse(entry.timestamp);
-  return Number.isFinite(parsed) ? parsed : fallback;
+  return Math.trunc(Number.isFinite(parsed) ? parsed : fallback);
 }
 
 function joinConsecutiveMessages(documents: IndexedMessage[]): IndexedMessage[] {
@@ -118,8 +118,8 @@ export function parseSessionContent(path: string, content: string, modified: num
     path,
     cwd: header.cwd ?? "",
     ...(sessionName ? { name: sessionName } : {}),
-    created: Number.isFinite(created) ? created : modified,
-    modified: latestMessageTimestamp || modified,
+    created: Math.trunc(Number.isFinite(created) ? created : modified),
+    modified: Math.trunc(latestMessageTimestamp || modified),
     messageCount: documents.length,
     firstMessage,
     ...(header.parentSession ? { parentSessionPath: header.parentSession } : {}),

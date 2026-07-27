@@ -25,6 +25,12 @@ import type {
 const CACHE_VERSION = 3;
 const DEFAULT_CONCURRENCY = 8;
 const DEFAULT_LIMIT = 10;
+/**
+ * Sessions parsed, indexed and persisted per batch. Each native call carries a
+ * fixed cost of roughly 60ms (index writer plus commit), so batches stay large
+ * enough to amortise it and small enough to bound memory.
+ */
+const SYNC_BATCH_SESSIONS = 250;
 
 interface PersistedCache {
   version: number;
@@ -80,6 +86,14 @@ export function parseTagQuery(query: string): { text: string; requiredTags: stri
   return { text, requiredTags: [...new Set(requiredTags)] };
 }
 
+function batches<T>(values: T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let index = 0; index < values.length; index += size) {
+    result.push(values.slice(index, index + size));
+  }
+  return result;
+}
+
 async function mapWithConcurrency<T, R>(
   values: T[],
   concurrency: number,
@@ -127,20 +141,40 @@ export async function discoverSessionFiles(agentDir: string): Promise<string[]> 
   return files;
 }
 
-function toNativeSession(parsed: ParsedSession, tags: string[]): NativeSessionInput {
+/**
+ * The native timestamp fields are i64: serde rejects a fractional number and the
+ * whole batch fails. Session parsing already truncates, but summaries loaded from
+ * an older state file can still hold `stat().mtimeMs` with its fractional part,
+ * so every value is squared off here, where all native writes converge.
+ */
+function epochMillis(value: number): number {
+  return Number.isFinite(value) ? Math.trunc(value) : 0;
+}
+
+export function toNativeSession(parsed: ParsedSession, tags: string[]): NativeSessionInput {
   return {
     id: parsed.summary.id,
     path: parsed.summary.path,
     cwd: parsed.summary.cwd,
-    timestamp: parsed.summary.modified,
+    timestamp: epochMillis(parsed.summary.modified),
     tags,
     messages: parsed.documents.map((document) => ({
       role: document.role,
       content: document.content,
-      timestamp: document.timestamp,
+      timestamp: epochMillis(document.timestamp),
       entryId: document.entryId,
       messageIndex: document.messageIndex,
     })),
+  };
+}
+
+export function toNativeTagInput(session: SessionSummary, tags: string[]): NativeTagInput {
+  return {
+    sessionId: session.id,
+    path: session.path,
+    cwd: session.cwd,
+    timestamp: epochMillis(session.modified),
+    tags,
   };
 }
 
@@ -169,7 +203,7 @@ export class RecallIndex {
 
   static async open(options: RecallIndexOptions): Promise<RecallIndex> {
     const cacheFile = options.cacheFile ?? join(options.agentDir, "cache", "pi-recall-v3.json");
-    const indexDir = options.indexDir ?? join(options.agentDir, "cache", "pi-recall-tantivy-v2");
+    const indexDir = options.indexDir ?? join(options.agentDir, "cache", "pi-recall-tantivy-v3");
     const tagFile = options.tagFile ?? join(options.agentDir, "pi-recall", "tags-v1.json");
     const tagStore = await TagStore.open(tagFile);
     let files = new Map<string, CachedFileState>();
@@ -260,40 +294,47 @@ export class RecallIndex {
       return !cached || cached.mtimeMs !== item.mtimeMs || cached.size !== item.size;
     });
 
-    let completed = 0;
-    const parsed = await mapWithConcurrency(changed, this.concurrency, async (item): Promise<ParsedFileResult> => {
-      try {
-        return { metadata: item, parsed: await parseSessionFile(item.path) };
-      } catch (error) {
-        return { metadata: item, error: errorMessage(error) };
-      } finally {
-        completed++;
-        onProgress?.({ indexed: completed, total: changed.length });
-      }
-    });
-
+    // Parse, index and persist in batches. Holding every parsed session and one
+    // JSON string of the whole corpus made a full rebuild peak near 800 MB here;
+    // batching also means a crash keeps the batches already written.
     const failed: Array<{ path: string; error: string }> = [];
-    const successful: Array<{ metadata: SessionFileMetadata; parsed: ParsedSession }> = [];
-    for (const result of parsed) {
-      if (!result.parsed) {
-        failed.push({ path: result.metadata.path, error: result.error ?? "Unknown parse error" });
-      } else {
-        successful.push({ metadata: result.metadata, parsed: result.parsed });
-      }
-    }
+    let indexed = 0;
+    let completed = 0;
+    let pendingDeletes = [...new Set([...removedPaths, ...changed.map((item) => item.path)])];
 
-    if (changed.length > 0 || removedPaths.length > 0 || force) {
+    for (const batch of batches(changed, SYNC_BATCH_SESSIONS)) {
+      const parsed = await mapWithConcurrency(batch, this.concurrency, async (item): Promise<ParsedFileResult> => {
+        try {
+          return { metadata: item, parsed: await parseSessionFile(item.path) };
+        } catch (error) {
+          return { metadata: item, error: errorMessage(error) };
+        } finally {
+          completed++;
+          onProgress?.({ indexed: completed, total: changed.length });
+        }
+      });
+
+      const successful: Array<{ metadata: SessionFileMetadata; parsed: ParsedSession }> = [];
+      for (const result of parsed) {
+        if (!result.parsed) {
+          failed.push({ path: result.metadata.path, error: result.error ?? "Unknown parse error" });
+        } else {
+          successful.push({ metadata: result.metadata, parsed: result.parsed });
+        }
+      }
+
       const changes: NativeChangesInput = {
         // Delete a changed file's old documents before inserting its replacement.
         // Including every changed path also keeps parse failures out of the index.
-        deletePaths: [...new Set([...removedPaths, ...changed.map((item) => item.path)])],
+        deletePaths: pendingDeletes,
         upserts: successful.map((result) =>
           toNativeSession(result.parsed, this.tagStore.all(result.parsed.summary.id)),
         ),
       };
       this.native.applyChanges(JSON.stringify(changes));
+      if (pendingDeletes.length > 0) for (const path of removedPaths) this.files.delete(path);
+      pendingDeletes = [];
 
-      for (const path of removedPaths) this.files.delete(path);
       for (const result of successful) {
         this.files.set(result.metadata.path, {
           mtimeMs: result.metadata.mtimeMs,
@@ -301,12 +342,20 @@ export class RecallIndex {
           summary: result.parsed.summary,
         });
       }
+      indexed += successful.length;
+      await this.save();
+    }
+
+    // Deletions with nothing to reindex still need one native call.
+    if (pendingDeletes.length > 0) {
+      this.native.applyChanges(JSON.stringify({ deletePaths: pendingDeletes, upserts: [] }));
+      for (const path of removedPaths) this.files.delete(path);
       await this.save();
     }
 
     return {
       discovered: metadata.length,
-      indexed: successful.length,
+      indexed,
       removed: removedPaths.length,
       failed,
     };
@@ -376,7 +425,12 @@ export class RecallIndex {
       : undefined;
     if (allowedSessionIds?.length === 0) return [];
     const nativeResults = parseNativeResults(
-      this.native.search(parsedQuery.text, limit, allowedSessionIds ? JSON.stringify(allowedSessionIds) : undefined),
+      this.native.search(
+        parsedQuery.text,
+        limit,
+        allowedSessionIds ? JSON.stringify(allowedSessionIds) : undefined,
+        this.isTypingLastToken(query, options),
+      ),
     );
     return nativeResults
       .map((result) => this.toSearchResult(result))
@@ -384,6 +438,17 @@ export class RecallIndex {
       .filter((result) => this.inScope(result.session, options))
       .filter((result) => this.tagStore.hasAll(result.session.id, parsedQuery.requiredTags))
       .slice(0, limit);
+  }
+
+  /**
+   * True when the caller wants prefix matching and the raw query still ends in a
+   * partial word. `parseTagQuery` trims and strips hashtags, so this has to be
+   * decided from the untouched query.
+   */
+  private isTypingLastToken(query: string, options: SearchOptions): boolean {
+    if (options.prefixLastToken !== true || /\s$/u.test(query)) return false;
+    const lastChunk = query.trimEnd().split(/\s+/u).at(-1) ?? "";
+    return !lastChunk.startsWith("#");
   }
 
   private toSearchResult(result: NativeSearchResult): RecallSearchResult | undefined {
@@ -470,13 +535,7 @@ export class RecallIndex {
   }
 
   private nativeTagInput(session: SessionSummary): NativeTagInput {
-    return {
-      sessionId: session.id,
-      path: session.path,
-      cwd: session.cwd,
-      timestamp: session.modified,
-      tags: this.tagStore.all(session.id),
-    };
+    return toNativeTagInput(session, this.tagStore.all(session.id));
   }
 
   private applyNativeTags(session: SessionSummary): void {

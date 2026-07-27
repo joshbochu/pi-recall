@@ -109,6 +109,30 @@ describe("parseSessionContent", () => {
     expect(parsed.documents).toHaveLength(1);
   });
 
+  it("truncates fractional fallback timestamps for native i64 inputs", () => {
+    const content = jsonl([
+      {
+        type: "session",
+        version: 3,
+        id: "fractional-mtime",
+        timestamp: "invalid",
+        cwd: "/work/app",
+      },
+      {
+        type: "message",
+        id: "user0001",
+        parentId: null,
+        timestamp: "invalid",
+        message: { role: "user", content: "Remember this" },
+      },
+    ]);
+
+    const parsed = parseSessionContent("/sessions/fractional.jsonl", content, 1_780_966_757_402.787);
+    expect(parsed.summary.created).toBe(1_780_966_757_402);
+    expect(parsed.summary.modified).toBe(1_780_966_757_402);
+    expect(parsed.documents[0]!.timestamp).toBe(1_780_966_757_402);
+  });
+
   it("joins consecutive messages from the same role like upstream Recall", () => {
     const content = jsonl([
       {

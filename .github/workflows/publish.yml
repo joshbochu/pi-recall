@@ -73,7 +73,7 @@ jobs:
   publish-native:
     needs: [version, verify]
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
           - target: darwin-arm64
@@ -103,6 +103,9 @@ jobs:
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
 
+      - name: Ensure npm supports trusted publishing
+        run: npm install --global npm@latest
+
       - name: Apply publish version
         run: node scripts/set-version.mjs "${{ needs.version.outputs.version }}"
 
@@ -119,12 +122,27 @@ jobs:
       - name: Build platform package
         run: node scripts/pack-platform.mjs ${{ matrix.target }} ${{ matrix.cargo-target }}
 
+      # New platform packages cannot be created via OIDC alone. Prefer NPM_TOKEN when
+      # present (first bootstrap); otherwise clear the setup-node placeholder so OIDC
+      # trusted publishing works for packages that already exist.
       - name: Publish platform package
-        run: npm publish --access public
+        id: publish
+        continue-on-error: true
         working-directory: npm/${{ matrix.target }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
+
+      - name: Report platform publish result
+        if: steps.publish.outcome != 'success'
+        run: |
+          echo "::warning::Could not publish @joshbochu/pi-recall-native-${{ matrix.target }}@${{ needs.version.outputs.version }}."
+          echo "For a first-time platform package, add an npm automation/granular token as the NPM_TOKEN repo secret,"
+          echo "or publish once manually and configure a trusted publisher for publish.yml. Root publish will continue."
 
   publish:
-    needs: [version, publish-native]
+    needs: [version, verify, publish-native]
+    if: always() && needs.version.result == 'success' && needs.verify.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -137,17 +155,23 @@ jobs:
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
 
+      - name: Ensure npm supports trusted publishing
+        run: npm install --global npm@latest
+
       - name: Apply publish version
         run: node scripts/set-version.mjs "${{ needs.version.outputs.version }}"
 
-      - name: Pin the prebuilt addons published above
-        run: npm run stamp:prebuilt
+      - name: Pin any prebuilt addons published above
+        run: node scripts/stamp-prebuilt-deps.mjs --published-only
 
       - name: Publish package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public
 
   finalize:
     needs: [version, publish]
+    if: always() && needs.publish.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository

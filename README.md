@@ -170,6 +170,13 @@ Before the first automated release, configure a GitHub Actions trusted publisher
 - Workflow filename: `publish.yml`
 - Allowed action: `npm publish`
 
+**First-time platform packages:** npm trusted publishing cannot create a brand-new package
+name. Either publish each `@joshbochu/pi-recall-native-*` package once with an npm token, or
+add a granular/automation token (with permission to create packages under `@joshbochu`) as the
+repository secret `NPM_TOKEN`. After the packages exist, configure trusted publishers for them
+and you can remove the token. Until a platform package is on npm, the root publish still
+proceeds and `postinstall` falls back to a local Cargo build for that platform.
+
 `npm run pack:platform -- <target> [cargo-target]` builds one platform package locally into
 `npm/<target>/`. `node scripts/next-version.mjs` prints the next publish version, and
 `npm run check:release` verifies that any `v*` tag matches the package version and that
@@ -177,8 +184,8 @@ Before the first automated release, configure a GitHub Actions trusted publisher
 
 `optionalDependencies` is not committed: a lock file cannot reference a version that has not
 been published, so committing it would break `npm ci`. The workflow publishes the platform
-packages first, then runs `npm run stamp:prebuilt`, so the published tarball always points at
-addons that exist.
+packages first, then runs `npm run stamp:prebuilt` (with `--published-only` in CI), so the
+published tarball only points at addons that exist.
 
 Manual major/minor bumps still work: raise the version in `package.json` (and the lockfile)
 above the latest npm release, merge to `main`, and the workflow publishes that version

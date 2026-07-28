@@ -1,4 +1,4 @@
-// Platforms that get a prebuilt addon package. Keys match native-binding.ts's
+// Platforms that get a bundled prebuilt addon. Keys match native-binding.ts's
 // nativeTarget(); the release workflow matrix must list exactly these targets,
 // which check-release.mjs verifies.
 export const NATIVE_TARGETS = [

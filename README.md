@@ -148,22 +148,19 @@ See [docs/architecture.md](docs/architecture.md) for component boundaries and th
 ## Publishing
 
 Every push to `main` publishes a new package version via GitHub Actions (`publish.yml`).
-The workflow chooses the next patch from `max(package.json, npm latest)`, verifies, publishes
-platform addons when possible, stamps `optionalDependencies` for addons that exist, publishes
-the root package, then records `release: vX.Y.Z` and tag `vX.Y.Z`.
+The workflow chooses the next patch from `max(package.json, npm latest)`, verifies the source,
+builds every supported platform addon, bundles those artifacts into the root package, publishes
+it, then records `release: vX.Y.Z` and tag `vX.Y.Z`. The publish job fails if any prebuilt is
+missing, so a release cannot silently fall back to requiring Rust on supported platforms.
 
-Trusted publisher on npm (per package, including each `@joshbochu/pi-recall-native-*`):
+Trusted publisher on npm:
 
 - Repository: `joshbochu/pi-recall`
 - Workflow: `publish.yml`
 - Allowed action: `npm publish`
 
-First-time platform package names need a one-shot `NPM_TOKEN` (or a manual first publish), then
-OIDC is enough. Until a platform addon exists, root still publishes and `postinstall` falls back
-to a local Cargo build.
-
 Helpers: `npm run pack:platform`, `npm run version:next`, `npm run check:release`,
-`npm run stamp:prebuilt`.
+`npm run check:prebuilds`.
 
 ## License
 

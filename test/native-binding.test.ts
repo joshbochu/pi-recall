@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { nativeTarget, openNativeEngine, prebuiltPackageName } from "../src/native-binding.js";
+import {
+  bundledPrebuiltPath,
+  nativeTarget,
+  openNativeEngine,
+  prebuiltPackageName,
+} from "../src/native-binding.js";
 
 describe("nativeTarget", () => {
   it("names the prebuilt package for each published platform", () => {
@@ -10,6 +15,9 @@ describe("nativeTarget", () => {
     expect(nativeTarget("linux", "x64", "musl")).toBe("linux-x64-musl");
     expect(nativeTarget("win32", "x64")).toBe("win32-x64-msvc");
     expect(prebuiltPackageName("darwin-arm64")).toBe("@joshbochu/pi-recall-native-darwin-arm64");
+    expect(bundledPrebuiltPath("darwin-arm64")).toMatch(
+      /native[/\\]prebuilds[/\\]darwin-arm64[/\\]pi-recall-native\.node$/u,
+    );
   });
 });
 

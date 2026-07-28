@@ -34,7 +34,7 @@ await writeFile(cargoPath, updatedCargo, "utf8");
 const cargoLockPath = join(root, "native", "Cargo.lock");
 const cargoLock = await readFile(cargoLockPath, "utf8");
 const updatedCargoLock = cargoLock.replace(
-  /(\[\[package\]\]\nname = "pi-recall-native"\nversion = ")[^"]+"/u,
+  /(\[\[package\]\]\r?\nname = "pi-recall-native"\r?\nversion = ")[^"]+"/u,
   `$1${version}"`,
 );
 if (updatedCargoLock === cargoLock) {

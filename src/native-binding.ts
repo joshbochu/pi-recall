@@ -69,7 +69,7 @@ function isNativeBinding(value: unknown): value is NativeBinding {
 }
 
 /**
- * Platform key for the prebuilt addon packages, matching napi-rs naming.
+ * Platform key for bundled prebuilt addons, matching napi-rs naming.
  * Exported for tests; `libc` distinguishes glibc from musl on Linux.
  */
 export function nativeTarget(
@@ -93,18 +93,25 @@ export function prebuiltPackageName(target: string = nativeTarget()): string {
   return `@joshbochu/pi-recall-native-${target}`;
 }
 
+export function bundledPrebuiltPath(target: string = nativeTarget()): string {
+  return fileURLToPath(
+    new URL(`../native/prebuilds/${target}/pi-recall-native.node`, import.meta.url),
+  );
+}
+
 /**
- * Load the addon: a published prebuilt for this platform first, then a local
- * `npm run build:native` result. Both are reported when neither is present,
- * because the difference decides whether the user needs Rust installed.
+ * Load the addon: the prebuilt bundled in the root package first, then a
+ * separately installed legacy platform package, then a local
+ * `npm run build:native` result.
  */
 export function openNativeEngine(indexPath: string): NativeRecallEngine {
   const require = createRequire(import.meta.url);
   const prebuilt = prebuiltPackageName();
+  const bundledPath = bundledPrebuiltPath();
   const localPath = fileURLToPath(new URL("../native/pi-recall-native-v2.node", import.meta.url));
   const attempts: string[] = [];
 
-  for (const candidate of [prebuilt, localPath]) {
+  for (const candidate of [bundledPath, prebuilt, localPath]) {
     let binding: unknown;
     try {
       binding = require(candidate);
@@ -117,7 +124,7 @@ export function openNativeEngine(indexPath: string): NativeRecallEngine {
   }
 
   throw new Error(
-    `Unable to load the pi-recall native addon for ${nativeTarget()}. Install the prebuilt package or run "npm run build:native" (needs Rust). Tried:\n  ${attempts.join("\n  ")}`,
+    `Unable to load the pi-recall native addon for ${nativeTarget()}. Run "npm run build:native" (needs Rust). Tried:\n  ${attempts.join("\n  ")}`,
   );
 }
 

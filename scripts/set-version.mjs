@@ -1,5 +1,5 @@
 // Write the publish version into package.json, package-lock.json, and the
-// native crate manifest so CI can bump without a prior manual version commit.
+// native crate manifest/lockfile so CI can bump without a prior manual commit.
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,5 +30,16 @@ const cargo = await readFile(cargoPath, "utf8");
 const updatedCargo = cargo.replace(/^version = "[^"]+"/mu, `version = "${version}"`);
 if (updatedCargo === cargo) throw new Error(`could not update version in ${cargoPath}`);
 await writeFile(cargoPath, updatedCargo, "utf8");
+
+const cargoLockPath = join(root, "native", "Cargo.lock");
+const cargoLock = await readFile(cargoLockPath, "utf8");
+const updatedCargoLock = cargoLock.replace(
+  /(\[\[package\]\]\nname = "pi-recall-native"\nversion = ")[^"]+"/u,
+  `$1${version}"`,
+);
+if (updatedCargoLock === cargoLock) {
+  throw new Error(`could not update pi-recall-native version in ${cargoLockPath}`);
+}
+await writeFile(cargoLockPath, updatedCargoLock, "utf8");
 
 console.log(`set package version to ${version}`);

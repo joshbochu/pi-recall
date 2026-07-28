@@ -70,7 +70,7 @@ jobs:
       - name: Run tests
         run: npm test
 
-  publish-native:
+  build-native:
     needs: [version, verify]
     strategy:
       fail-fast: false
@@ -100,11 +100,7 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: "24"
-          registry-url: https://registry.npmjs.org
           package-manager-cache: false
-
-      - name: Ensure npm supports trusted publishing
-        run: npm install --global npm@latest
 
       - name: Apply publish version
         run: node scripts/set-version.mjs "${{ needs.version.outputs.version }}"
@@ -122,27 +118,15 @@ jobs:
       - name: Build platform package
         run: node scripts/pack-platform.mjs ${{ matrix.target }} ${{ matrix.cargo-target }}
 
-      # New platform packages cannot be created via OIDC alone. Prefer NPM_TOKEN when
-      # present (first bootstrap); otherwise clear the setup-node placeholder so OIDC
-      # trusted publishing works for packages that already exist.
-      - name: Publish platform package
-        id: publish
-        continue-on-error: true
-        working-directory: npm/${{ matrix.target }}
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: node ../../scripts/publish-npm.mjs
-
-      - name: Report platform publish result
-        if: steps.publish.outcome != 'success'
-        run: |
-          echo "::warning::Could not publish @joshbochu/pi-recall-native-${{ matrix.target }}@${{ needs.version.outputs.version }}."
-          echo "For a first-time platform package, add an npm automation/granular token as the NPM_TOKEN repo secret,"
-          echo "or publish once manually and configure a trusted publisher for publish.yml. Root publish will continue."
+      - name: Upload prebuilt addon
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: npm/${{ matrix.target }}/pi-recall-native.node
+          if-no-files-found: error
 
   publish:
-    needs: [version, verify, publish-native]
-    if: always() && needs.version.result == 'success' && needs.verify.result == 'success'
+    needs: [version, build-native]
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -161,8 +145,13 @@ jobs:
       - name: Apply publish version
         run: node scripts/set-version.mjs "${{ needs.version.outputs.version }}"
 
-      - name: Pin any prebuilt addons published above
-        run: node scripts/stamp-prebuilt-deps.mjs --published-only
+      - name: Download prebuilt addons
+        uses: actions/download-artifact@v8
+        with:
+          path: native/prebuilds
+
+      - name: Verify bundled prebuilt addons
+        run: npm run check:prebuilds
 
       - name: Publish package
         env:
@@ -193,7 +182,7 @@ jobs:
           node scripts/set-version.mjs "$VERSION"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package.json package-lock.json native/Cargo.toml
+          git add package.json package-lock.json native/Cargo.toml native/Cargo.lock
           if git diff --staged --quiet; then
             echo "version files already at ${VERSION}"
           else

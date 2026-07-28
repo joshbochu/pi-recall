@@ -1,6 +1,6 @@
-// postinstall: use the prebuilt addon for this platform when npm installed one,
-// otherwise build from source. Building needs Rust, so say so plainly when it is
-// missing instead of failing inside cargo.
+// postinstall: use the prebuilt addon bundled for this platform, with support
+// for legacy optional platform packages, otherwise build from source. Building
+// needs Rust, so say so plainly when it is missing instead of failing in cargo.
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { existsSync } from "node:fs";
@@ -23,6 +23,12 @@ function nativeTarget() {
 
 const target = nativeTarget();
 const prebuilt = `@joshbochu/pi-recall-native-${target}`;
+const bundled = join(root, "native", "prebuilds", target, "pi-recall-native.node");
+
+if (existsSync(bundled)) {
+  console.log(`pi-recall: using bundled prebuilt addon for ${target}`);
+  process.exit(0);
+}
 
 try {
   require.resolve(prebuilt);
@@ -41,9 +47,8 @@ const cargo = spawnSync("cargo", ["--version"], { stdio: "ignore" });
 if (cargo.error || cargo.status !== 0) {
   console.error(
     [
-      `pi-recall: no prebuilt addon for ${target} and cargo is not on PATH.`,
-      "Install Rust (https://rustup.rs) and reinstall, or install on a platform with a",
-      "published prebuilt package.",
+      `pi-recall: no bundled prebuilt addon for ${target} and cargo is not on PATH.`,
+      "Install Rust (https://rustup.rs) and reinstall, or use a supported platform.",
     ].join("\n"),
   );
   process.exit(1);

@@ -143,7 +143,7 @@ export class RecallPicker implements Component, Focusable {
     this.theme = options.theme;
     this.keybindings = options.keybindings;
     this.done = options.done;
-    this.scope = options.initialScope ?? "current";
+    this.scope = options.initialScope ?? "all";
     this.input = new Input();
     if (options.initialQuery) this.input.handleInput(options.initialQuery);
     this.refresh();

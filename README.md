@@ -34,10 +34,10 @@ In-session manual (after install):
 | Type | Search (trailing tokens get prefix matching while you type) |
 | ↑ / ↓ | Move selection |
 | Enter | Resume the selected session |
-| Tab | Toggle this folder ↔ all projects |
+| Tab | Toggle all projects ↔ this folder |
 | Esc | Close |
 
-`/recall-reindex` rebuilds the search index. Tags and config are kept.
+`/recall` starts in all-projects mode; Tab narrows the search to this folder. `/recall-reindex` rebuilds the search index. Tags and config are kept.
 
 ## Commands
 

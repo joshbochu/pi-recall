@@ -9,7 +9,7 @@ import {
   SEARCH_DEBOUNCE_MS,
   visibleResultCount,
 } from "../src/recall-picker.js";
-import type { RecallSearchResult } from "../src/types.js";
+import type { RecallScope, RecallSearchResult } from "../src/types.js";
 
 function plainTheme(): Theme {
   return {
@@ -72,9 +72,11 @@ function result(overrides: Partial<RecallSearchResult["session"]> = {}, snippet 
 }
 
 const searches: Array<{ query: string; prefixLastToken: boolean | undefined }> = [];
+const scopes: RecallScope[] = [];
 
 afterEach(() => {
   searches.length = 0;
+  scopes.length = 0;
   vi.useRealTimers();
 });
 
@@ -83,13 +85,15 @@ function picker(options: {
   results?: RecallSearchResult[];
   rows?: number;
   query?: string;
+  initialScope?: RecallScope;
   done?: (path: string | undefined) => void;
 } = {}) {
   const results = options.results ?? [result(), result({ path: "/sessions/b.jsonl", tags: [] })];
   const index = {
     countSessions: () => 2438,
-    search: (query: string, searchOptions: { prefixLastToken?: boolean }) => {
+    search: (query: string, searchOptions: { prefixLastToken?: boolean; scope?: RecallScope }) => {
       searches.push({ query, prefixLastToken: searchOptions.prefixLastToken });
+      if (searchOptions.scope) scopes.push(searchOptions.scope);
       return results;
     },
   } as unknown as RecallIndex;
@@ -97,6 +101,7 @@ function picker(options: {
     index,
     cwd: "/work/app",
     initialQuery: options.query ?? "matched",
+    initialScope: options.initialScope,
     currentSessionPath: "/sessions/a.jsonl",
     tui: { terminal: { rows: options.rows ?? 30, columns: 80 }, requestRender: () => {} } as never,
     theme: options.theme ?? plainTheme(),
@@ -173,7 +178,7 @@ describe("RecallPicker.render", () => {
   });
 
   it("nudges toward all projects when a scoped search finds nothing", () => {
-    const lines = picker({ results: [] }).render(78).join("\n");
+    const lines = picker({ results: [], initialScope: "current" }).render(78).join("\n");
     expect(lines).toContain("no matching sessions");
     expect(lines).toContain("searches all projects");
   });
@@ -218,5 +223,15 @@ describe("RecallPicker.render", () => {
     const lines = picker({ query: "#pi-extensions deploy", theme: ansiTheme() }).render(64);
     expect([...new Set(lines.map((line) => visibleWidth(line)))]).toEqual([64]);
     expect(lines.join("\n")).toContain("filter");
+  });
+
+  it("searches all projects by default", () => {
+    picker();
+    expect(scopes).toEqual(["all"]);
+  });
+
+  it("preserves an explicitly requested current-folder scope", () => {
+    picker({ initialScope: "current" });
+    expect(scopes).toEqual(["current"]);
   });
 });

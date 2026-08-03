@@ -274,7 +274,7 @@ export default function recallExtension(pi: ExtensionAPI) {
       const initialQuery = subcommand === "search" ? commandArgs : trimmedArgs;
 
       if (ctx.mode !== "tui") {
-        const results = index.search(initialQuery, { cwd: ctx.cwd, scope: "current", limit: 20 });
+        const results = index.search(initialQuery, { cwd: ctx.cwd, scope: "all", limit: 20 });
         if (!ctx.hasUI) return;
         const labels = results.map((result, index) => {
           const title = result.session.name || result.session.firstMessage || result.session.id;
@@ -287,16 +287,12 @@ export default function recallExtension(pi: ExtensionAPI) {
       }
 
       const currentSessionPath = ctx.sessionManager.getSessionFile();
-      // Opening scoped to a folder with no sessions would show an empty picker.
-      const initialScope =
-        index.countSessions({ cwd: ctx.cwd, scope: "current" }) === 0 ? "all" : "current";
       const selectedPath = await ctx.ui.custom<string | undefined>(
         (tui, theme, keybindings, done) =>
           new RecallPicker({
             index,
             cwd: ctx.cwd,
             initialQuery,
-            initialScope,
             ...(currentSessionPath ? { currentSessionPath } : {}),
             tui,
             theme,

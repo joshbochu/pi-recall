@@ -576,7 +576,7 @@ dependencies = [
 
 [[package]]
 name = "pi-recall-native"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "napi",
  "napi-build",
